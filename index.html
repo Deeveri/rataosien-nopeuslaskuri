@@ -93,7 +93,7 @@
     <div>
       <h1>Rataosien nopeuslaskuri</h1>
       <p>Laskee junien keskinopeuksia rataosien todellisten välimatkojen perusteella.</p>
-      <div class="version">Kehitysversio 2.00</div>
+      <div class="version">Kehitysversio 2.03</div>
     </div>
     <div class="theme-toggle" aria-label="Teema">
       <button type="button" data-theme="dark">Tumma</button>
@@ -162,7 +162,7 @@
   </section>
 </main>
 <footer>
-  Rataosien nopeuslaskuri · kehitysversio 2.00 · Data: Väylävirasto, Luettelo rautatieliikennepaikoista 1.1.2024 · Avoimen datan lähteet: Fintraffic/Digitraffic-rajapinta ja Väyläviraston julkaisu 32/2024. Data on poimittu "Luettelo rautatieliikennepaikoista 1.1.2024" -dokumentin (Väyläviraston julkaisuja 32/2024) kohdasta 6 Rautatieliikennepaikat ja liikennepaikkojen osat rataosittain. Laskenta käyttää peräkkäisten liikennepaikkojen välimatka-arvoja, ei pelkkää km-sijaintien erotusta.
+  Rataosien nopeuslaskuri · kehitysversio 2.03 · Data: Väylävirasto, Luettelo rautatieliikennepaikoista 1.1.2024 · Avoimen datan lähteet: Fintraffic/Digitraffic-rajapinta ja Väyläviraston julkaisu 32/2024. Data on poimittu "Luettelo rautatieliikennepaikoista 1.1.2024" -dokumentin (Väyläviraston julkaisuja 32/2024) kohdasta 6 Rautatieliikennepaikat ja liikennepaikkojen osat rataosittain. Laskenta käyttää peräkkäisten liikennepaikkojen välimatka-arvoja, ei pelkkää km-sijaintien erotusta.
 </footer>
 
 <script>
@@ -172,7 +172,8 @@ const ROUTES = {"Helsinki–Turku satama":[{"name":"Helsinki asema","code":"Hki"
 
 const App = (() => {
   const API_BASE = 'https://rata.digitraffic.fi/api/v1';
-  const USER_HEADER = { 'Digitraffic-User': 'Rataosien-nopeuslaskuri/2.0' };
+  // Selaimessa oma HTTP-header voi joissakin ympäristöissä aiheuttaa CORS-esitarkistuksen.
+  // Pidetään haku yksinkertaisena GET-pyyntönä, jotta GitHub Pages / iPad / iPhone toimivat varmemmin.
   const MIN_DISTANCE_KM = 10;
   const trainCache = new Map();
 
@@ -216,10 +217,17 @@ const App = (() => {
     els.searchBtn.addEventListener('click', runSearch);
   }
 
+  function getSortedRouteNames() {
+    return Object.keys(ROUTES).sort((a, b) =>
+      a.localeCompare(b, 'fi', { sensitivity: 'base' })
+    );
+  }
+
   function fillRouteSelects() {
-    const names = Object.keys(ROUTES);
-    fillSelect(els.speedRouteSelect, names.map(name => [name, name]));
-    fillSelect(els.routeSelect, names.map(name => [name, name]));
+    const names = getSortedRouteNames();
+    const options = names.map(name => [name, name]);
+    fillSelect(els.speedRouteSelect, options);
+    fillSelect(els.routeSelect, options);
     const preferred = names.includes('Helsinki–Riihimäki') ? 'Helsinki–Riihimäki' : names[0];
     els.speedRouteSelect.value = preferred;
     els.routeSelect.value = preferred;
@@ -249,11 +257,36 @@ const App = (() => {
 
   async function fetchTrains(date) {
     if (trainCache.has(date)) return trainCache.get(date);
-    const res = await fetch(`${API_BASE}/trains/${date}`, { headers: USER_HEADER });
-    if (!res.ok) throw new Error(`Digitraffic vastasi HTTP ${res.status}`);
-    const data = await res.json();
-    trainCache.set(date, data);
-    return data;
+    if (!date) throw new Error('Valitse päivä.');
+
+    // Ensisijainen Digitraffic-kutsu. Toinen URL on varmistus siltä varalta,
+    // että rajapinnan reititys muuttuu tai selain käsittelee polkua poikkeavasti.
+    const urls = [
+      `${API_BASE}/trains/${encodeURIComponent(date)}`,
+      `${API_BASE}/trains?departure_date=${encodeURIComponent(date)}`
+    ];
+
+    let lastError = null;
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, { method: 'GET', mode: 'cors' });
+        if (!res.ok) {
+          lastError = new Error(`Digitraffic vastasi HTTP ${res.status}`);
+          continue;
+        }
+        const data = await res.json();
+        if (!Array.isArray(data)) {
+          lastError = new Error('Digitraffic palautti odottamattoman vastauksen.');
+          continue;
+        }
+        trainCache.set(date, data);
+        return data;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    throw lastError || new Error('Junatietojen haku epäonnistui.');
   }
 
   function trainLabel(train) {
@@ -278,9 +311,14 @@ const App = (() => {
     return null;
   }
 
+  function normCode(value) {
+    return String(value || '').trim().toLocaleUpperCase('fi-FI');
+  }
+
   function rowsForCode(train, code, actualOnly) {
+    const target = normCode(code);
     return (train.timeTableRows || [])
-      .filter(row => row.stationShortCode === code)
+      .filter(row => normCode(row.stationShortCode) === target)
       .map(row => ({ row, time: rowTime(row, actualOnly) }))
       .filter(x => x.time && Number.isFinite(x.time.ms))
       .sort((a,b) => a.time.ms - b.time.ms);
@@ -394,7 +432,7 @@ const App = (() => {
   function makeResult(train, routeName, from, to, distance, timed, speed, reversed) {
     return {
       train, routeName, from, to, distance, timed, speed, reversed,
-      key: `${routeName}|${from.code}|${to.code}`,
+      key: `${routeName}|${normCode(from.code)}|${normCode(to.code)}`,
       note: 'Keskinopeus laskettu yli 10 kilometrin matkalta.'
     };
   }
